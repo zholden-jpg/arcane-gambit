@@ -264,3 +264,12 @@ input, textarea { -webkit-user-select: text; user-select: text; }
   #dlg-text { font-size: 1.05rem; min-height: 2em; }
   .dialogue-box { margin-bottom: 1vh; padding: 12px 16px; }
 }
+
+/* Portals without invite-link support: players share the 5-letter code instead */
+.no-invite-links #btn-copy2, .no-invite-links .share { display: none !important; }
+.no-invite-links .room-line::after { content: ' — tell your friend this code'; color: var(--muted); font-family: var(--serif); }
+/* While a portal ad is showing, ignore clicks on the game */
+.ad-playing .screen { pointer-events: none; }
+
+/* Builds without online duels (portals that forbid outside servers) */
+.no-online [data-go="duel"] { display: none !important; }

@@ -7,7 +7,9 @@
   "scripts": {
     "start": "node server.js",
     "test": "node --test test/*.test.js",
-    "build:crazygames": "node scripts/build-crazygames.mjs"
+    "build": "node scripts/build.mjs",
+    "build:crazygames": "node scripts/build.mjs crazygames",
+    "build:all": "node scripts/build.mjs all"
   },
   "engines": {
     "node": ">=18"

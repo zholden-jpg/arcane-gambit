@@ -1,73 +1,286 @@
-// Platform layer: CrazyGames SDK when available, plain browser otherwise.
-// The CrazyGames build (npm run build:crazygames) adds the SDK <script> tag to index.html.
-// Without it, every function here quietly falls back to normal browser behaviour.
+// Platform layer: talks to whichever game portal is hosting the game.
+//
+// The portal build (npm run build -- <target> ...) sets window.AG_PLATFORM and adds that
+// portal's SDK <script>. Supported targets:
+//   crazygames        CrazyGames SDK v3      (ads, cloud saves, usernames, invite links, rooms)
+//   poki              Poki SDK v2            (ads, shareable invite URLs)
+//   gamedistribution  GameDistribution SDK   (ads)
+//   playgama          Playgama Bridge        (ads + saves across Playgama's partner sites)
+//   gamepix           GamePix SDK v3         (ads + saves; offline modes only — GamePix forbids external requests)
+//   gamemonetize      GameMonetize SDK       (ads)
+//   y8                Y8 SDK 2.0             (ads)
+// Without a target (plain `npm start`), everything falls back to normal browser behaviour.
 
-const sdk = () => (window.CrazyGames && window.CrazyGames.SDK) || null;
+const target = window.AG_PLATFORM || 'browser';
+const ids = window.AG_PLATFORM_IDS || {};
 
 export const platform = {
-  env: 'browser',      // 'crazygames' | 'local' (CrazyGames SDK test mode) | 'browser'
-  isCrazyGames: false, // true for 'crazygames' and 'local'
-  user: null,          // { username, profilePictureUrl } when signed in to CrazyGames
+  target,
+  env: 'browser',
+  isCrazyGames: false,
+  user: null,                // CrazyGames user { username, ... } when signed in
+  supportsInviteLinks: true, // false where the portal's page URL can't carry a duel code
+  onlineDuels: window.AG_ONLINE !== false, // portals that forbid external servers get a build without online duels
 };
 
 let playing = false;
+let adapter = null;
 
-export async function initPlatform() {
-  const s = sdk();
-  if (!s) return platform;
-  try {
+// ------------------------------------------------------------------ adapters
+const cg = () => window.CrazyGames && window.CrazyGames.SDK;
+
+const adapters = {
+  async crazygames() {
+    const s = cg();
+    if (!s) return null;
     await s.init();
     platform.env = s.environment;
-    platform.isCrazyGames = s.environment === 'crazygames' || s.environment === 'local';
-  } catch (e) {
-    console.warn('CrazyGames SDK init failed', e);
-    return platform;
-  }
-  if (platform.isCrazyGames) {
+    if (s.environment !== 'crazygames' && s.environment !== 'local') return null;
+    platform.isCrazyGames = true;
     try { platform.user = await s.user.getUser(); } catch { platform.user = null; }
+    try { s.user.addAuthListener((u) => { platform.user = u; }); } catch { /* optional */ }
+    return {
+      gameplay: (on) => (on ? s.game.gameplayStart() : s.game.gameplayStop()),
+      happytime: () => s.game.happytime(),
+      ad: () => new Promise((resolve) => {
+        s.ad.requestAd('midgame', { adStarted() {}, adFinished: resolve, adError: resolve });
+      }),
+      get: (k) => s.data.getItem(k),
+      set: (k, v) => s.data.setItem(k, v),
+      inviteLink: async (params) => s.game.inviteLink(params),
+      getInviteParam: (n) => s.game.getInviteParam(n),
+      updateRoom: (roomId, isJoinable) => s.game.updateRoom({ roomId, isJoinable, inviteParams: { duel: roomId } }),
+      leftRoom: () => s.game.leftRoom(),
+      isInstantMultiplayer: () => !!s.game.isInstantMultiplayer,
+      onJoinRoom: (fn) => s.game.addJoinRoomListener(fn),
+    };
+  },
+
+  async poki() {
+    const P = window.PokiSDK;
+    if (!P) return null;
+    try { await P.init(); } catch { /* ad blocker: keep going without ads */ }
+    platform.env = 'poki';
+    return {
+      loaded: () => P.gameLoadingFinished(),
+      gameplay: (on) => (on ? P.gameplayStart() : P.gameplayStop()),
+      ad: () => P.commercialBreak().catch(() => {}),
+      inviteLink: (params) => P.shareableURL(params),
+      getInviteParam: (n) => P.getURLParam(n),
+    };
+  },
+
+  async gamedistribution() {
+    platform.env = 'gamedistribution';
+    platform.supportsInviteLinks = false;
+    return {
+      ad: () => eventAd(() => {
+        const sdk = window.gdsdk;
+        if (!sdk || typeof sdk.showAd !== 'function') return false;
+        return sdk.showAd();
+      }),
+    };
+  },
+
+  async gamemonetize() {
+    platform.env = 'gamemonetize';
+    platform.supportsInviteLinks = false;
+    return {
+      ad: () => eventAd(() => {
+        const sdk = window.sdk;
+        if (!sdk || typeof sdk.showBanner !== 'function') return false;
+        sdk.showBanner();
+        return true;
+      }),
+    };
+  },
+
+  async y8() {
+    // The SDK script loads async: wait for it (up to 8 s), then init with our app + game IDs.
+    const y8 = await waitFor(() => window.y8 && typeof window.y8.sdk === 'function' && window.y8, 8000);
+    if (!y8) return null;
+    const s = y8.sdk();
     try {
-      s.user.addAuthListener((user) => { platform.user = user; });
-    } catch { /* optional */ }
+      await s.init({ appId: ids.y8AppId, autoLogin: false }, { gameId: ids.y8GameId, preloadAdBreaks: 'auto', sound: 'off' });
+    } catch (e) { console.warn('[platform] y8 init', e); }
+    platform.env = 'y8';
+    platform.supportsInviteLinks = false;
+    return {
+      ad: () => new Promise((resolve) => {
+        try {
+          Promise.resolve(s.showAd({
+            type: 'next',
+            name: 'between-games',
+            beforeAd: () => {},
+            afterAd: () => {},
+            adBreakDone: () => resolve(),
+          })).catch(() => resolve());
+        } catch { resolve(); }
+        setTimeout(resolve, 60000);
+      }),
+    };
+  },
+
+  async playgama() {
+    const b = window.bridge;
+    if (!b) return null;
+    await b.initialize();
+    platform.env = 'playgama:' + (b.platform && b.platform.id);
+    platform.supportsInviteLinks = false;
+    // Bridge storage is async: preload our keys once so reads can stay synchronous.
+    const cache = {};
+    try {
+      const keys = ['ag-progress', 'ag-name'];
+      const vals = await b.storage.get(keys);
+      keys.forEach((k, i) => { if (vals && vals[i] != null) cache[k] = typeof vals[i] === 'string' ? vals[i] : JSON.stringify(vals[i]); });
+    } catch { /* fall back to empty */ }
+    let adDone = null;
+    try {
+      b.advertisement.on(b.EVENT_NAME.INTERSTITIAL_STATE_CHANGED, (state) => {
+        if ((state === 'closed' || state === 'failed') && adDone) { const d = adDone; adDone = null; d(); }
+      });
+    } catch { /* older bridge */ }
+    return {
+      loaded: () => b.platform.sendMessage('game_ready'),
+      gameplay: (on) => b.platform.sendMessage(on ? 'gameplay_started' : 'gameplay_stopped'),
+      ad: () => new Promise((resolve) => {
+        adDone = resolve;
+        setTimeout(() => { if (adDone === resolve) { adDone = null; resolve(); } }, 45000);
+        try { b.advertisement.showInterstitial('level_completed'); } catch { adDone = null; resolve(); }
+      }),
+      get: (k) => (k in cache ? cache[k] : null),
+      set: (k, v) => { cache[k] = v; try { b.storage.set(k, v); } catch { /* ignore */ } },
+    };
+  },
+};
+
+adapters.gamepix = async () => {
+  const G = window.GamePix;
+  if (!G) return null;
+  platform.env = 'gamepix';
+  platform.supportsInviteLinks = false;
+  // GamePix storage is usable after loaded(); everything is downloaded by now, so report it.
+  try { G.loading(100); } catch { /* optional */ }
+  try { await Promise.race([Promise.resolve(G.loaded()), new Promise((r) => setTimeout(r, 5000))]); } catch { /* keep going */ }
+  return {
+    happytime: () => G.happyMoment(),
+    ad: () => Promise.race([Promise.resolve(G.interstitialAd()), new Promise((r) => setTimeout(r, 60000))]).catch(() => {}),
+    get: (k) => G.localStorage.getItem(k),
+    set: (k, v) => G.localStorage.setItem(k, v),
+  };
+};
+
+/** Resolve when check() returns something truthy (or with null after `ms`). */
+function waitFor(check, ms) {
+  return new Promise((resolve) => {
+    const t0 = Date.now();
+    (function poll() {
+      let v = null;
+      try { v = check(); } catch { v = null; }
+      if (v) return resolve(v);
+      if (Date.now() - t0 > ms) return resolve(null);
+      setTimeout(poll, 100);
+    })();
+  });
+}
+
+/**
+ * Ads for SDKs that report through SDK_GAME_PAUSE / SDK_GAME_START events
+ * (GameDistribution, GameMonetize). The build wires those events to window.__agAdEvent.
+ * If no ad starts within a few seconds (frequency cap, ad blocker, no fill), carry on.
+ */
+function eventAd(show) {
+  return new Promise((resolve) => {
+    let started = false;
+    const done = () => { window.__agAdEvent = null; resolve(); };
+    window.__agAdEvent = (name) => {
+      if (name === 'SDK_GAME_PAUSE') started = true;
+      if (name === 'SDK_GAME_START' && started) done();
+    };
+    let r;
+    try { r = show(); } catch { r = false; }
+    if (r === false) return done();
+    if (r && typeof r.then === 'function') r.then(() => setTimeout(done, 300), done);
+    setTimeout(() => { if (!started) done(); }, 3500);
+    setTimeout(done, 60000);
+  });
+}
+
+export async function initPlatform() {
+  const make = adapters[target];
+  if (!make) return platform;
+  try {
+    adapter = await make();
+  } catch (e) {
+    console.warn(`[platform] ${target} init failed`, e);
+    adapter = null;
   }
   return platform;
 }
 
-function call(fn) {
-  if (!platform.isCrazyGames) return undefined;
-  try { return fn(sdk()); } catch (e) { console.warn('CrazyGames SDK call failed', e); return undefined; }
+function call(name, ...args) {
+  if (!adapter || typeof adapter[name] !== 'function') return undefined;
+  try { return adapter[name](...args); } catch (e) { console.warn(`[platform] ${name} failed`, e); return undefined; }
 }
 
-// ---- gameplay events (tell CrazyGames when the player is actively playing)
+/** Call once the game is ready to play (hides portal loading screens). */
+export const gameLoaded = () => call('loaded');
+
+/** Tell the portal whether the player is actively in a match. */
 export function setPlaying(active) {
   if (active === playing) return;
   playing = active;
-  call((s) => (active ? s.game.gameplayStart() : s.game.gameplayStop()));
+  call('gameplay', active);
 }
-export const happytime = () => call((s) => s.game.happytime());
 
-// ---- saves: CrazyGames cloud/data module, else localStorage
+export const happytime = () => call('happytime');
+
+let adBusy = false;
+let lastAd = Date.now(); // no ad in the first minute after loading
+const AD_GAP_MS = 90 * 1000;
+let lastAdWasStartup = true; // the first break can come 60 s after load
+/**
+ * Show a between-games ad if the portal offers one. Always resolves (ad finished,
+ * failed, blocked or not available). Portals cap the frequency themselves.
+ * Only call this at natural breaks, right after a player clicks a button.
+ */
+export async function breakAd() {
+  if (!adapter || !adapter.ad || adBusy) return;
+  // CrazyGames paces its own ads; for the others, keep at least 90 s between breaks.
+  if (target !== 'crazygames' && Date.now() - lastAd < AD_GAP_MS - 30000 * (lastAdWasStartup ? 1 : 0)) return;
+  adBusy = true;
+  setPlaying(false);
+  document.body.classList.add('ad-playing');
+  try { await Promise.race([adapter.ad(), new Promise((r) => setTimeout(r, 60000))]); } catch { /* ignore */ }
+  document.body.classList.remove('ad-playing');
+  lastAd = Date.now();
+  lastAdWasStartup = false;
+  adBusy = false;
+}
+
+// ---- saves: portal storage when available, else localStorage
 export const storage = {
   get(key, fallback) {
     let raw = null;
-    if (platform.isCrazyGames) raw = call((s) => s.data.getItem(key));
+    if (adapter && adapter.get) raw = call('get', key);
     else { try { raw = localStorage.getItem(key); } catch { raw = null; } }
     if (raw == null) return fallback;
     try { return JSON.parse(raw) ?? fallback; } catch { return fallback; }
   },
   set(key, value) {
     const raw = JSON.stringify(value);
-    if (platform.isCrazyGames) call((s) => s.data.setItem(key, raw));
+    if (adapter && adapter.set) call('set', key, raw);
     else { try { localStorage.setItem(key, raw); } catch { /* storage unavailable */ } }
   },
 };
 
-// ---- multiplayer rooms & invite links
-export const inviteLink = (params) => call((s) => s.game.inviteLink(params)) || null;
-export const getInviteParam = (name) => call((s) => s.game.getInviteParam(name)) || null;
-export const updateRoom = (roomId, isJoinable) =>
-  call((s) => s.game.updateRoom({ roomId, isJoinable, inviteParams: { duel: roomId } }));
-export const leftRoom = () => call((s) => s.game.leftRoom());
-export const isInstantMultiplayer = () => !!call((s) => s.game.isInstantMultiplayer);
-export function onJoinRoom(fn) {
-  call((s) => s.game.addJoinRoomListener(fn));
+// ---- multiplayer invites & rooms
+/** Returns a portal invite URL (string) or null. May be async on some portals. */
+export async function inviteLink(params) {
+  try { return (await call('inviteLink', params)) || null; } catch { return null; }
 }
+export const getInviteParam = (name) => call('getInviteParam', name) || null;
+export const updateRoom = (roomId, isJoinable) => call('updateRoom', roomId, isJoinable);
+export const leftRoom = () => call('leftRoom');
+export const isInstantMultiplayer = () => !!call('isInstantMultiplayer');
+export const onJoinRoom = (fn) => call('onJoinRoom', fn);

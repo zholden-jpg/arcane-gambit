@@ -49,28 +49,35 @@ The server hosts both the game and the duels, so your friend has to be able to r
 - **Same Wi-Fi:** run `npm start` and find your computer's local IP (on a Mac: System Settings → Wi-Fi → Details, or run `ipconfig getifaddr en0`). Open `http://<that-ip>:3000` yourself, then create the duel. The share link will use that address.
 - **Over the internet:** deploy this repo to Render (free). `render.yaml` sets everything up: build `npm install`, start `npm start`, health check `/health`. The free plan sleeps after 15 minutes without players; the game shows a "waking up the duel arena" message while it starts again (up to about a minute).
 
-## Publishing on CrazyGames
+## Publishing on game portals (with ads)
 
-CrazyGames hosts the game files; the duel server runs separately (on Render).
+The game files are hosted by the portal; the duel server runs separately (on Render).
+Each portal gets its own build with that portal's SDK and ad calls:
 
-1. Deploy the duel server (above) and note its address, e.g. `https://arcane-gambit.onrender.com`.
-2. Build the upload:
-   ```bash
-   npm run build:crazygames -- wss://arcane-gambit.onrender.com
-   ```
-   This writes `dist/arcane-gambit-crazygames.zip`. The build uses relative paths, includes the CrazyGames SDK, and points online duels at your server.
-3. Upload the zip in the CrazyGames Developer Portal, along with the covers and preview videos from `promo/`.
+```bash
+npm run build -- all wss://arcane-gambit.onrender.com          # every portal
+npm run build -- gamedistribution wss://arcane-gambit.onrender.com   # one portal
+```
 
-On CrazyGames the game automatically:
-- saves story progress with the CrazyGames data module (cloud saves for signed-in players),
-- reports gameplay start/stop and "happy time" on victories,
-- uses the player's CrazyGames username in duels (or "Guest"),
-- creates CrazyGames invite links, updates room status, and joins duels from invite links or "Instant Multiplayer",
-- swaps free-text chat for quick-chat phrases.
+| Target | Upload file | Ads | Saves | Online duels |
+|---|---|---|---|---|
+| `crazygames` | `dist/arcane-gambit-crazygames.zip` | midgame (after Full Launch) | CrazyGames cloud | invite links + rooms |
+| `gamedistribution` | `dist/arcane-gambit-gamedistribution.zip` | showAd | browser | 5-letter code |
+| `gamemonetize` | `dist/arcane-gambit-gamemonetize.zip` | showBanner | browser | 5-letter code |
+| `y8` | `dist/arcane-gambit-y8.zip` | showAd (`next`) | browser | 5-letter code |
+| `gamepix` | `dist/arcane-gambit-gamepix.zip` | interstitialAd | GamePix storage | off (GamePix forbids outside servers) |
+| `poki` | `dist/arcane-gambit-poki.zip` | commercialBreak | browser | shareable URLs |
+| `playgama` | `dist/arcane-gambit-playgama.zip` | interstitial | Bridge storage | 5-letter code |
 
-Outside CrazyGames (for example with `npm start`) none of that SDK code runs.
+Portal IDs go in `portals.config.json` (GameDistribution Game ID, GameMonetize Game ID, Y8 App ID + Game ID).
+Ads are spaced at least 90 seconds apart (CrazyGames paces its own), and never in the first minute.
 
-Test the CrazyGames build locally by serving `dist/crazygames/` on `localhost` — the SDK runs in its "local" test mode there.
+Ads only appear at natural breaks, right after the player clicks something: starting a story chapter, Try again,
+Restart, starting/replaying a local duel, and asking for an online rematch. Portals cap how often ads show.
+
+Note: Poki is web-exclusive by default. If Poki accepts the game on an exclusive deal, it has to come off the other web portals.
+
+Test a build locally by serving `dist/` and opening e.g. `http://localhost:8000/crazygames/` (the SDKs run in test mode on localhost).
 
 ## Project layout
 
@@ -81,9 +88,10 @@ shared/rulesets.js   Every battlefield (starting setup + twist flags)
 shared/story.js      Chapters: dialogue, opponent, AI strength
 shared/ai.js         Alpha-beta AI that follows whatever rules a board has
 public/              The browser game (index.html, style.css, js/, fonts/)
-public/js/platform.js  CrazyGames SDK integration (no-op elsewhere)
+public/js/platform.js  Portal SDKs: CrazyGames, GameDistribution, GameMonetize, Y8, GamePix, Poki, Playgama
 public/js/config.js  Duel server address (blank = same server)
-scripts/             build-crazygames.mjs — makes the CrazyGames upload zip
+scripts/             build.mjs — makes the portal upload zips
+portals.config.json  Portal IDs used by the build
 promo/               Cover art page used to render store images
 render.yaml          Render deployment settings
 test/                Engine tests (includes perft checks against standard chess)

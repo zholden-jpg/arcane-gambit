@@ -5,12 +5,13 @@ import { chooseMove } from '../shared/ai.js';
 import { BoardView, pieceHTML } from './board.js';
 import { Net } from './net.js';
 import {
-  platform, initPlatform, storage, setPlaying, happytime,
+  platform, initPlatform, storage, setPlaying, happytime, gameLoaded, breakAd,
   inviteLink, getInviteParam, updateRoom, leftRoom, isInstantMultiplayer, onJoinRoom,
 } from './platform.js';
 
 await initPlatform();
 document.body.classList.toggle('on-crazygames', platform.isCrazyGames);
+document.body.classList.toggle('no-online', !platform.onlineDuels);
 
 const $ = (s) => document.querySelector(s);
 const NAMES = { w: 'White', b: 'Black' };
@@ -149,8 +150,9 @@ $('#btn-play-story').onclick = () => {
   const i = nextChapterIndex();
   if (i < 0) show('story'); else startChapter(i);
 };
-function startChapter(idx) {
+async function startChapter(idx) {
   const ch = CHAPTERS[idx];
+  await breakAd();
   const go = () => playDialogue(ch.intro, () => startGame({ mode: 'story', chapter: ch }));
   if (idx === 0 && !progress.seenPrologue) {
     progress.seenPrologue = true; saveProgress();
@@ -170,7 +172,7 @@ for (const sel of document.querySelectorAll('.arena-select')) {
   const upd = () => { twist.textContent = RULESETS[sel.value].twist; };
   sel.onchange = upd; upd();
 }
-$('#btn-local-start').onclick = () => startGame({ mode: 'local', arena: $('#local-arena').value });
+$('#btn-local-start').onclick = async () => { await breakAd(); startGame({ mode: 'local', arena: $('#local-arena').value }); };
 
 // ------------------------------------------------------------ AI worker
 let worker = null;
@@ -382,20 +384,21 @@ function finish() {
         showModal(o.winner ? 'Defeat' : 'A Draw', `<p>${escapeHTML(o.reason)}.</p><p class="hint">${escapeHTML(ch.opponent)} awaits a rematch.</p>`, [
           { label: 'Story map', fn: () => show('story') },
           { label: 'Undo last move', fn: () => undo() },
-          { label: 'Try again', primary: true, fn: () => startGame({ mode: 'story', chapter: ch }) },
+          { label: 'Try again', primary: true, fn: async () => { await breakAd(); startGame({ mode: 'story', chapter: ch }); } },
         ]);
       }
     } else if (game.mode === 'local') {
       showModal(o.winner ? `${NAMES[o.winner]} wins!` : 'Draw', `<p>${escapeHTML(o.reason)}.</p>`, [
         { label: 'Menu', fn: () => show('title') },
-        { label: 'Play again', primary: true, fn: () => startGame({ mode: 'local', arena: game.arena }) },
+        { label: 'Play again', primary: true, fn: async () => { const arena = game.arena; await breakAd(); startGame({ mode: 'local', arena }); } },
       ]);
     } else {
       const title = !o.winner ? 'Draw' : o.winner === game.myColor ? 'Victory!' : 'Defeat';
       if (o.winner === game.myColor) happytime();
       showModal(title, `<p>${escapeHTML(o.winner ? names[o.winner] + ' wins' : 'Nobody wins')} — ${escapeHTML(o.reason)}.</p><p id="rematch-note" class="hint"></p>`, [
         { label: 'Leave', fn: leaveOnline },
-        { label: 'Rematch', primary: true, keepOpen: true, id: 'btn-rematch', fn: () => {
+        { label: 'Rematch', primary: true, keepOpen: true, id: 'btn-rematch', fn: async () => {
+          await breakAd();
           net.send({ type: 'rematch' });
           const n = $('#rematch-note'); if (n) n.textContent = 'Rematch requested — waiting for your opponent…';
         } },
@@ -423,7 +426,13 @@ function undo() {
 }
 
 $('#btn-undo').onclick = undo;
-$('#btn-restart').onclick = () => game && startGame({ mode: game.mode, chapter: game.chapter, arena: game.arena });
+$('#btn-restart').onclick = async () => {
+  if (!game) return;
+  const cfg = { mode: game.mode, chapter: game.chapter, arena: game.arena };
+  game.token = Math.random(); // cancel any pending AI move
+  await breakAd();
+  startGame(cfg);
+};
 $('#btn-resign').onclick = () => {
   if (!game || game.over) return;
   showModal('Resign?', '<p>Your opponent will be declared the winner.</p>', [
@@ -447,7 +456,10 @@ let reconnecting = false;
 const nameInput = $('#duel-name');
 nameInput.value = store.get('ag-name', '');
 nameInput.oninput = () => store.set('ag-name', nameInput.value);
-const duelLink = (code) => inviteLink({ duel: code }) || `${location.origin}${location.pathname}?duel=${code}`;
+async function duelLink(code) {
+  return (await inviteLink({ duel: code })) || `${location.origin}${location.pathname}?duel=${code}`;
+}
+if (!platform.supportsInviteLinks) document.body.classList.add('no-invite-links');
 const myName = () => (platform.isCrazyGames ? (platform.user && platform.user.username) || 'Guest' : nameInput.value);
 if (platform.isCrazyGames) $('#cg-name').textContent = myName();
 
@@ -480,15 +492,15 @@ async function copyText(text, btn) {
   if (btn) { const old = btn.textContent; btn.textContent = 'Copied!'; setTimeout(() => { btn.textContent = old; }, 1200); }
 }
 $('#btn-copy').onclick = (e) => copyText($('#share-link').value, e.target);
-$('#btn-copy2').onclick = (e) => game && copyText(duelLink(game.code), e.target);
+$('#btn-copy2').onclick = async (e) => { if (game) copyText(await duelLink(game.code), e.target); };
 
 net.on('created', (msg) => {
   session.set('ag-token-' + msg.code, msg.token);
-  if (!platform.isCrazyGames) history.replaceState(null, '', '?duel=' + msg.code);
+  if (platform.target === 'browser') history.replaceState(null, '', '?duel=' + msg.code);
   updateRoom(msg.code, true);
   duelNote('');
   $('#duel-waiting').classList.remove('hidden');
-  $('#share-link').value = duelLink(msg.code);
+  duelLink(msg.code).then((link) => { $('#share-link').value = link; });
   $('#share-code').textContent = msg.code;
   // Enter the game screen right away so the host sees the board while waiting.
   startOnline({ code: msg.code, arena: msg.arena, color: msg.color, names: { [msg.color]: myName() || 'Host' }, moves: [], ready: false });
@@ -496,7 +508,7 @@ net.on('created', (msg) => {
 
 net.on('joined', (msg) => {
   session.set('ag-token-' + msg.code, msg.token);
-  if (!platform.isCrazyGames) history.replaceState(null, '', '?duel=' + msg.code);
+  if (platform.target === 'browser') history.replaceState(null, '', '?duel=' + msg.code);
   duelNote('');
 });
 
@@ -613,7 +625,7 @@ function leaveOnline() {
   net.close();
   reconnecting = false;
   game = null;
-  if (!platform.isCrazyGames) history.replaceState(null, '', location.pathname);
+  if (platform.target === 'browser') history.replaceState(null, '', location.pathname);
   $('#duel-waiting').classList.add('hidden');
   closeModal();
   show('title');
@@ -626,7 +638,7 @@ function joinFromInvite(code) {
   show('duel');
   $('#duel-code').value = code;
   const token = session.get('ag-token-' + code);
-  if (token || platform.isCrazyGames) {
+  if (token || platform.target !== 'browser') {
     duelNote('Connecting to the duel arena…');
     net.send({ type: 'join', code, name: myName(), token });
   } else nameInput.focus();
@@ -636,13 +648,14 @@ function joinFromInvite(code) {
 onJoinRoom((params) => { if (params && params.duel) joinFromInvite(params.duel); });
 
 const params = new URLSearchParams(location.search);
-const duelCode = getInviteParam('duel') || params.get('duel');
+const duelCode = platform.onlineDuels ? getInviteParam('duel') || params.get('duel') : null;
 if (duelCode) {
   joinFromInvite(duelCode);
-} else if (isInstantMultiplayer()) {
+} else if (platform.onlineDuels && isInstantMultiplayer()) {
   // Launched from CrazyGames' "play with friends" button: open a duel right away.
   show('duel');
   $('#btn-create').click();
 } else {
   show('title');
 }
+gameLoaded();

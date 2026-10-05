@@ -1,0 +1,6 @@
+{
+  "_help": "IDs from each portal's developer dashboard. Fill these in, then run: npm run build -- all wss://arcane-gambit.onrender.com",
+  "gamedistribution": { "gameId": "" },
+  "gamemonetize": { "gameId": "" },
+  "y8": { "appId": "", "gameId": "" }
+}
