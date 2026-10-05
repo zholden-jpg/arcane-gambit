@@ -4,14 +4,23 @@ import { CHAPTERS, PROLOGUE, STORY_TITLE } from '../shared/story.js';
 import { chooseMove } from '../shared/ai.js';
 import { BoardView, pieceHTML } from './board.js';
 import { Net } from './net.js';
+import { sfx, setMuted, isMuted } from './sound.js';
+import { inCheck } from '../shared/engine.js';
 import {
   platform, initPlatform, storage, setPlaying, happytime, gameLoaded, breakAd,
+  portalMuted, onPortalSettings, portalChatDisabled, reportProgress, setGameContext, onAd,
   inviteLink, getInviteParam, updateRoom, leftRoom, isInstantMultiplayer, onJoinRoom,
 } from './platform.js';
 
 await initPlatform();
 document.body.classList.toggle('on-crazygames', platform.isCrazyGames);
 document.body.classList.toggle('no-online', !platform.onlineDuels);
+
+// ---- sound: player toggle + portal mute setting + silence during ads
+setMuted('platform', portalMuted());
+document.body.classList.toggle('chat-off', portalChatDisabled());
+onPortalSettings((st) => { setMuted('platform', st.muteAudio); document.body.classList.toggle('chat-off', !!st.disableChat); });
+onAd((playing) => setMuted('ad', playing));
 
 const $ = (s) => document.querySelector(s);
 const NAMES = { w: 'White', b: 'Black' };
@@ -203,6 +212,7 @@ let game = null;
 function startGame(cfg) {
   closeModal();
   const arena = cfg.mode === 'story' ? cfg.chapter.ruleset : cfg.arena;
+  setGameContext({ mode: cfg.mode, battlefield: arena, chapter: cfg.chapter ? cfg.chapter.id : null });
   const def = RULESETS[arena];
   game = {
     ...cfg,
@@ -325,6 +335,7 @@ function applyMove(move) {
     const me = game.mode === 'local' ? null : viewer();
     if (color !== me) text = '· · ·';
   }
+  playMoveSound(after, color);
   game.history.push({ state: before, log: game.log.length });
   game.log.push(text);
   game.state = after;
@@ -333,6 +344,17 @@ function applyMove(move) {
     if (o) { game.over = o; renderGame(); return finish(); }
   }
   renderGame();
+}
+
+function playMoveSound(after, mover) {
+  const L = after.last;
+  // In the mist, the enemy's moves only make a plain sound (no hints about captures).
+  if (after.rules.fog && game.mode !== 'local' && mover !== viewer()) return sfx.move();
+  if (L.exploded) sfx.boom();
+  else if (L.teleported) sfx.portal();
+  else if (L.captured) sfx.capture();
+  else sfx.move();
+  if (!after.rules.kingCapture && inCheck(after)) setTimeout(sfx.check, 120);
 }
 
 function onHumanMove(move) {
@@ -370,12 +392,15 @@ async function aiTurn() {
 function finish() {
   const o = game.over;
   const names = playerNames();
+  const meWon = game.mode === 'story' ? o.winner === 'w' : game.mode === 'online' ? o.winner === game.myColor : !!o.winner;
+  setTimeout(() => (o.winner && meWon ? sfx.win() : o.winner ? sfx.lose() : sfx.move()), 300);
   setTimeout(() => {
     if (!game || game.over !== o) return;
     if (game.mode === 'story') {
       const ch = game.chapter;
       if (o.winner === 'w') {
         if (!progress.done.includes(ch.id)) { progress.done.push(ch.id); saveProgress(); }
+        reportProgress((progress.done.length / CHAPTERS.length) * 100);
         happytime();
         showModal('Victory!', `<p>${escapeHTML(o.reason)}.</p>`, [
           { label: 'Continue', primary: true, fn: () => playDialogue(ch.outro, () => show('story')) },
@@ -426,6 +451,20 @@ function undo() {
 }
 
 $('#btn-undo').onclick = undo;
+
+// Sound on/off (remembered). The portal's own mute setting still wins.
+const soundBtn = $('#btn-sound');
+function updateSoundBtn() { soundBtn.textContent = store.get('ag-sound', true) ? 'Sound: on' : 'Sound: off'; }
+setMuted('user', !store.get('ag-sound', true));
+updateSoundBtn();
+soundBtn.onclick = () => {
+  const on = !store.get('ag-sound', true);
+  store.set('ag-sound', on);
+  setMuted('user', !on);
+  updateSoundBtn();
+  if (on) sfx.move();
+};
+void isMuted;
 $('#btn-restart').onclick = async () => {
   if (!game) return;
   const cfg = { mode: game.mode, chapter: game.chapter, arena: game.arena };
@@ -554,7 +593,7 @@ net.on('rematch-requested', () => {
 
 net.on('opponent-status', (msg) => setOppStatus(msg.connected));
 
-net.on('chat', (msg) => addChat(msg.from, msg.name, msg.text));
+net.on('chat', (msg) => { if (!document.body.classList.contains('chat-off')) addChat(msg.from, msg.name, msg.text); });
 
 net.on('error', (msg) => {
   if (game && game.mode === 'online') {

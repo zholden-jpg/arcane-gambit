@@ -273,3 +273,6 @@ input, textarea { -webkit-user-select: text; user-select: text; }
 
 /* Builds without online duels (portals that forbid outside servers) */
 .no-online [data-go="duel"] { display: none !important; }
+
+/* Portal "disable chat" setting: hide all player chat */
+.chat-off .quick-chat, .chat-off .chat-form, .chat-off .chat-log .chat:not(.system) { display: none !important; }

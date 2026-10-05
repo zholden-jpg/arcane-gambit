@@ -39,7 +39,14 @@ const adapters = {
     platform.isCrazyGames = true;
     try { platform.user = await s.user.getUser(); } catch { platform.user = null; }
     try { s.user.addAuthListener((u) => { platform.user = u; }); } catch { /* optional */ }
+    try { s.game.loadingStart(); } catch { /* optional */ }
     return {
+      loaded: () => s.game.loadingStop(),
+      audioMuted: () => !!(s.game.settings && s.game.settings.muteAudio),
+      chatDisabled: () => !!(s.game.settings && s.game.settings.disableChat),
+      onSettings: (fn) => s.game.addSettingsChangeListener((st) => fn({ muteAudio: !!(st && st.muteAudio), disableChat: !!(st && st.disableChat) })),
+      progress: (pct) => s.game.reportGameCompletedPercentage(pct),
+      context: (ctxObj) => s.game.setGameContext(ctxObj),
       gameplay: (on) => (on ? s.game.gameplayStart() : s.game.gameplayStop()),
       happytime: () => s.game.happytime(),
       ad: () => new Promise((resolve) => {
@@ -235,6 +242,19 @@ export function setPlaying(active) {
 
 export const happytime = () => call('happytime');
 
+/** Portal-level mute (e.g. CrazyGames "mute audio" setting). */
+export const portalMuted = () => !!call('audioMuted');
+export const onPortalSettings = (fn) => call('onSettings', fn);
+/** Portal-level "disable chat" setting (CrazyGames). */
+export const portalChatDisabled = () => !!call('chatDisabled');
+/** Overall game completion, 0–100 (story progress). */
+export const reportProgress = (pct) => call('progress', Math.max(0, Math.min(100, Math.round(pct))));
+/** Context attached to player feedback reports (which mode/chapter they were in). */
+export const setGameContext = (obj) => call('context', obj);
+
+const adHooks = [];
+/** fn(true) when an ad starts, fn(false) when it ends — used to mute game audio. */
+export const onAd = (fn) => adHooks.push(fn);
 let adBusy = false;
 let lastAd = Date.now(); // no ad in the first minute after loading
 const AD_GAP_MS = 90 * 1000;
@@ -251,8 +271,10 @@ export async function breakAd() {
   adBusy = true;
   setPlaying(false);
   document.body.classList.add('ad-playing');
+  adHooks.forEach((h) => h(true));
   try { await Promise.race([adapter.ad(), new Promise((r) => setTimeout(r, 60000))]); } catch { /* ignore */ }
   document.body.classList.remove('ad-playing');
+  adHooks.forEach((h) => h(false));
   lastAd = Date.now();
   lastAdWasStartup = false;
   adBusy = false;
