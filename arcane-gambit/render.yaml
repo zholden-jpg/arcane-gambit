@@ -1,9 +1,0 @@
-# Render Blueprint: the Arcane Gambit duel server on Render's free plan.
-services:
-  - type: web
-    name: arcane-gambit
-    runtime: node
-    plan: free
-    buildCommand: npm install
-    startCommand: npm start
-    healthCheckPath: /health
