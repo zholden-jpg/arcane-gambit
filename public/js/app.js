@@ -9,6 +9,7 @@ import { inCheck } from '../shared/engine.js';
 import {
   platform, initPlatform, storage, setPlaying, happytime, gameLoaded, breakAd,
   portalMuted, onPortalSettings, portalChatDisabled, reportProgress, setGameContext, onAd,
+  rewardAvailable, rewardAd,
   inviteLink, getInviteParam, updateRoom, leftRoom, isInstantMultiplayer, onJoinRoom,
 } from './platform.js';
 
@@ -223,6 +224,7 @@ function startGame(cfg) {
     log: [],
     over: null,
     thinking: false,
+    freeUndos: cfg.mode === 'story' ? 1 : Infinity, // story: 1 free take-back per battle, then optional rewarded ad
     pending: false,
     handoff: false,
     token: Math.random(),
@@ -306,6 +308,7 @@ function renderGame() {
   }
   ml.scrollTop = ml.scrollHeight;
   $('#btn-undo').disabled = !game.history.length || game.thinking;
+  $('#btn-undo').textContent = undoNeedsAd() ? 'Undo (ad)' : 'Undo';
   syncPlaying();
 }
 
@@ -403,25 +406,25 @@ function finish() {
         reportProgress((progress.done.length / CHAPTERS.length) * 100);
         happytime();
         showModal('Victory!', `<p>${escapeHTML(o.reason)}.</p>`, [
-          { label: 'Continue', primary: true, fn: () => playDialogue(ch.outro, () => show('story')) },
+          { label: 'Continue', primary: true, fn: async () => { await breakAd(); playDialogue(ch.outro, () => show('story')); } },
         ]);
       } else {
         showModal(o.winner ? 'Defeat' : 'A Draw', `<p>${escapeHTML(o.reason)}.</p><p class="hint">${escapeHTML(ch.opponent)} awaits a rematch.</p>`, [
-          { label: 'Story map', fn: () => show('story') },
-          { label: 'Undo last move', fn: () => undo() },
+          { label: 'Story map', fn: async () => { await breakAd(); show('story'); } },
+          { label: undoNeedsAd() ? 'Redo last move (watch ad)' : 'Redo last move', fn: () => requestUndo() },
           { label: 'Try again', primary: true, fn: async () => { await breakAd(); startGame({ mode: 'story', chapter: ch }); } },
         ]);
       }
     } else if (game.mode === 'local') {
       showModal(o.winner ? `${NAMES[o.winner]} wins!` : 'Draw', `<p>${escapeHTML(o.reason)}.</p>`, [
-        { label: 'Menu', fn: () => show('title') },
+        { label: 'Menu', fn: async () => { await breakAd(); show('title'); } },
         { label: 'Play again', primary: true, fn: async () => { const arena = game.arena; await breakAd(); startGame({ mode: 'local', arena }); } },
       ]);
     } else {
       const title = !o.winner ? 'Draw' : o.winner === game.myColor ? 'Victory!' : 'Defeat';
       if (o.winner === game.myColor) happytime();
       showModal(title, `<p>${escapeHTML(o.winner ? names[o.winner] + ' wins' : 'Nobody wins')} — ${escapeHTML(o.reason)}.</p><p id="rematch-note" class="hint"></p>`, [
-        { label: 'Leave', fn: leaveOnline },
+        { label: 'Leave', fn: async () => { await breakAd(); leaveOnline(); } },
         { label: 'Rematch', primary: true, keepOpen: true, id: 'btn-rematch', fn: async () => {
           await breakAd();
           net.send({ type: 'rematch' });
@@ -431,6 +434,30 @@ function finish() {
       ]);
     }
   }, 600);
+}
+
+/** In story mode, the free take-back is used up and the portal offers rewarded ads. */
+function undoNeedsAd() {
+  return !!game && game.mode === 'story' && game.freeUndos <= 0 && rewardAvailable();
+}
+
+/** Undo button / "Redo last move": free first, then an optional rewarded ad. */
+function requestUndo() {
+  if (!game || game.thinking || !game.history.length || game.mode === 'online') return;
+  if (!undoNeedsAd()) {
+    if (game.mode === 'story') game.freeUndos--;
+    return undo();
+  }
+  const g = game;
+  showModal('Take back your move?', '<p>You have used your free take-back for this battle. Watch a short ad to undo your last move.</p>', [
+    { label: 'No thanks', fn: () => {} },
+    { label: 'Watch ad', fn: async () => {
+      const ok = await rewardAd();
+      if (game !== g) return;
+      if (ok) undo();
+      else showModal('No take-back', '<p>The ad did not finish, so the move stays. You can try again or keep playing.</p>', [{ label: 'OK', primary: true }], true);
+    } },
+  ]);
 }
 
 function undo() {
@@ -450,7 +477,7 @@ function undo() {
   renderGame();
 }
 
-$('#btn-undo').onclick = undo;
+$('#btn-undo').onclick = requestUndo;
 
 // Sound on/off (remembered). The portal's own mute setting still wins.
 const soundBtn = $('#btn-sound');

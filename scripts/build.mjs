@@ -53,6 +53,7 @@ const SDK = {
       onEvent: function (event) {
         // SDK_GAME_PAUSE = ad starting (game is paused), SDK_GAME_START = ad over: let the game continue.
         if (window.__agAdEvent) window.__agAdEvent(event.name);
+        if (event.name === 'SDK_REWARDED_WATCH_COMPLETE' && window.__agRewardDone) window.__agRewardDone();
       },
     };
     (function (d, s, id) {

@@ -52,6 +52,9 @@ const adapters = {
       ad: () => new Promise((resolve) => {
         s.ad.requestAd('midgame', { adStarted() {}, adFinished: resolve, adError: resolve });
       }),
+      reward: () => new Promise((resolve) => {
+        s.ad.requestAd('rewarded', { adStarted() {}, adFinished: () => resolve(true), adError: () => resolve(false) });
+      }),
       get: (k) => s.data.getItem(k),
       set: (k, v) => s.data.setItem(k, v),
       inviteLink: async (params) => s.game.inviteLink(params),
@@ -72,6 +75,7 @@ const adapters = {
       loaded: () => P.gameLoadingFinished(),
       gameplay: (on) => (on ? P.gameplayStart() : P.gameplayStop()),
       ad: () => P.commercialBreak().catch(() => {}),
+      reward: () => P.rewardedBreak().then((ok) => !!ok, () => false),
       inviteLink: (params) => P.shareableURL(params),
       getInviteParam: (n) => P.getURLParam(n),
     };
@@ -85,6 +89,15 @@ const adapters = {
         const sdk = window.gdsdk;
         if (!sdk || typeof sdk.showAd !== 'function') return false;
         return sdk.showAd();
+      }),
+      reward: () => new Promise((resolve) => {
+        const sdk = window.gdsdk;
+        if (!sdk || typeof sdk.showAd !== 'function') return resolve(false);
+        let watched = false;
+        window.__agRewardDone = () => { watched = true; };
+        const finish = (ok) => { window.__agRewardDone = null; resolve(ok); };
+        Promise.resolve(sdk.showAd('rewarded')).then(() => setTimeout(() => finish(watched), 300), () => finish(watched));
+        setTimeout(() => finish(watched), 90000);
       }),
     };
   },
@@ -125,6 +138,20 @@ const adapters = {
         } catch { resolve(); }
         setTimeout(resolve, 60000);
       }),
+      reward: () => new Promise((resolve) => {
+        let ok = false;
+        try {
+          Promise.resolve(s.showAd({
+            type: 'reward',
+            name: 'undo-move',
+            beforeReward: (showAdFn) => showAdFn(),
+            adViewed: () => { ok = true; },
+            adDismissed: () => { ok = false; },
+            adBreakDone: () => resolve(ok),
+          })).catch(() => resolve(false));
+        } catch { resolve(false); }
+        setTimeout(() => resolve(ok), 90000);
+      }),
     };
   },
 
@@ -155,6 +182,18 @@ const adapters = {
         setTimeout(() => { if (adDone === resolve) { adDone = null; resolve(); } }, 45000);
         try { b.advertisement.showInterstitial('level_completed'); } catch { adDone = null; resolve(); }
       }),
+      reward: () => new Promise((resolve) => {
+        let ok = false;
+        const done = (v) => { resolve(v); };
+        try {
+          b.advertisement.on(b.EVENT_NAME.REWARDED_STATE_CHANGED, (state) => {
+            if (state === 'rewarded') ok = true;
+            if (state === 'closed' || state === 'failed') done(ok);
+          });
+          b.advertisement.showRewarded('undo_move');
+        } catch { done(false); }
+        setTimeout(() => done(ok), 90000);
+      }),
       get: (k) => (k in cache ? cache[k] : null),
       set: (k, v) => { cache[k] = v; try { b.storage.set(k, v); } catch { /* ignore */ } },
     };
@@ -172,6 +211,8 @@ adapters.gamepix = async () => {
   return {
     happytime: () => G.happyMoment(),
     ad: () => Promise.race([Promise.resolve(G.interstitialAd()), new Promise((r) => setTimeout(r, 60000))]).catch(() => {}),
+    reward: () => Promise.race([Promise.resolve(G.rewardAd()), new Promise((r) => setTimeout(() => r({ success: false }), 90000))])
+      .then((res) => !!(res && res.success), () => false),
     get: (k) => G.localStorage.getItem(k),
     set: (k, v) => G.localStorage.setItem(k, v),
   };
@@ -257,7 +298,7 @@ const adHooks = [];
 export const onAd = (fn) => adHooks.push(fn);
 let adBusy = false;
 let lastAd = Date.now(); // no ad in the first minute after loading
-const AD_GAP_MS = 90 * 1000;
+const AD_GAP_MS = 60 * 1000;
 let lastAdWasStartup = true; // the first break can come 60 s after load
 /**
  * Show a between-games ad if the portal offers one. Always resolves (ad finished,
@@ -266,8 +307,8 @@ let lastAdWasStartup = true; // the first break can come 60 s after load
  */
 export async function breakAd() {
   if (!adapter || !adapter.ad || adBusy) return;
-  // CrazyGames paces its own ads; for the others, keep at least 90 s between breaks.
-  if (target !== 'crazygames' && Date.now() - lastAd < AD_GAP_MS - 30000 * (lastAdWasStartup ? 1 : 0)) return;
+  // CrazyGames paces its own ads; for the others, keep at least 60 s between breaks (and none in the first 45 s).
+  if (target !== 'crazygames' && Date.now() - lastAd < AD_GAP_MS - 15000 * (lastAdWasStartup ? 1 : 0)) return;
   adBusy = true;
   setPlaying(false);
   document.body.classList.add('ad-playing');
@@ -278,6 +319,29 @@ export async function breakAd() {
   lastAd = Date.now();
   lastAdWasStartup = false;
   adBusy = false;
+}
+
+/** True when this portal offers rewarded ads (the game falls back to free rewards otherwise). */
+export const rewardAvailable = () => !!(adapter && adapter.reward);
+
+/**
+ * Optional rewarded ad the player chose to watch. Resolves true only if the ad was fully watched.
+ * Not subject to the between-games cooldown (the player asked for it).
+ */
+export async function rewardAd() {
+  if (!adapter || !adapter.reward || adBusy) return false;
+  adBusy = true;
+  setPlaying(false);
+  document.body.classList.add('ad-playing');
+  adHooks.forEach((h) => h(true));
+  let ok = false;
+  try { ok = await Promise.race([adapter.reward(), new Promise((r) => setTimeout(() => r(false), 95000))]); } catch { ok = false; }
+  document.body.classList.remove('ad-playing');
+  adHooks.forEach((h) => h(false));
+  lastAd = Date.now(); // no interstitial straight after a rewarded ad
+  lastAdWasStartup = false;
+  adBusy = false;
+  return !!ok;
 }
 
 // ---- saves: portal storage when available, else localStorage
