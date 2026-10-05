@@ -1,0 +1,94 @@
+<!doctype html>
+<!-- Cover art for store listings. Rendered to PNG by promo/render-covers.mjs
+     (served from the built game folder so it can reuse the real board and pieces). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arcane Gambit cover</title>
+<link rel="stylesheet" href="../style.css">
+<style>
+  html, body { width: 100%; height: 100%; overflow: hidden; margin: 0; }
+  body {
+    background:
+      radial-gradient(ellipse 60% 50% at 50% 62%, #8b6cf055 0%, transparent 70%),
+      radial-gradient(ellipse 90% 60% at 50% 0%, #3a2a6a 0%, transparent 70%),
+      linear-gradient(#1b1336, #0b0816);
+  }
+  .stars { opacity: .9; background-size: 300px 300px; }
+  .stage { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; }
+  .logo-wrap { position: relative; z-index: 3; text-align: center; margin-top: var(--title-top); }
+  .logo-wrap h1 {
+    font-family: 'Cinzel', serif; font-weight: 700; margin: 0; line-height: .95;
+    font-size: var(--title-size); letter-spacing: .03em; color: #f5ecd8;
+    text-shadow: 0 0 .25em #8b6cf0aa, 0 .06em .12em #000c;
+  }
+  .logo-wrap h1 span { display: block; color: #f3d892; text-shadow: 0 0 .3em #d8b46a88, 0 .06em .12em #000c; }
+  .logo-wrap.row h1 span { display: inline; }
+  .rule { width: 60%; height: 2px; margin: .5em auto 0; background: linear-gradient(90deg, transparent, #d8b46a, transparent); font-size: var(--title-size); }
+  .board-wrap { position: absolute; left: 50%; bottom: var(--board-bottom); width: var(--board-size); transform: translateX(-50%) perspective(1600px) rotateX(var(--tilt)); transform-origin: 50% 100%; filter: drop-shadow(0 40px 60px #000c); }
+  .board-wrap .board { box-shadow: 0 0 0 2px #d8b46a, 0 0 120px #8b6cf088, 0 0 40px #d8b46a44; }
+  .board .coord { display: none; }
+  .glow { position: absolute; left: 50%; bottom: 0; width: 120%; height: 40%; transform: translateX(-50%); background: radial-gradient(ellipse at 50% 100%, #d8b46a33, transparent 70%); pointer-events: none; }
+  .sparks i { position: absolute; width: 4px; height: 4px; border-radius: 50%; background: #f3d892; box-shadow: 0 0 10px #f3d892; opacity: .8; }
+
+  /* layouts */
+  body.landscape { --title-size: 150px; --title-top: 70px; --board-size: 820px; --board-bottom: -160px; --tilt: 42deg; }
+  body.portrait  { --title-size: 104px; --title-top: 80px; --board-size: 700px; --board-bottom: -60px; --tilt: 34deg; }
+  body.square    { --title-size: 84px;  --title-top: 50px; --board-size: 600px; --board-bottom: -120px; --tilt: 40deg; }
+  body.video     { --title-size: 150px; --title-top: 70px; --board-size: 820px; --board-bottom: -160px; --tilt: 42deg; }
+  body.video-portrait { --title-size: 130px; --title-top: 110px; --board-size: 940px; --board-bottom: -40px; --tilt: 34deg; }
+</style>
+</head>
+<body>
+<div class="stars"></div>
+<div class="stage">
+  <div class="logo-wrap" id="logo"><h1>Arcane <span>Gambit</span></h1><div class="rule"></div></div>
+  <div class="board-wrap"><div id="board" class="board"></div></div>
+  <div class="glow"></div>
+  <div class="sparks" id="sparks"></div>
+</div>
+<script type="module">
+  import { createGame } from '../shared/engine.js';
+  import { BoardView } from '../js/board.js';
+
+  const layout = new URLSearchParams(location.search).get('layout') || 'landscape';
+  document.body.className = layout;
+  if (layout === 'landscape' || layout === 'video') document.getElementById('logo').classList.add('row');
+
+  const def = {
+    id: 'cover',
+    portals: [['a3', 'h6']],
+    setup: [
+      '.r.wk.w.',
+      'pp.g.pp.',
+      '..p..#..',
+      '.#.pd..p',
+      '...P.M..',
+      '..N..#.P',
+      'PP.D.PP.',
+      '.R..K..R',
+    ],
+  };
+  const st = createGame(def);
+  const view = new BoardView(document.getElementById('board'));
+  const at = (sq) => (8 - +sq[1]) * 8 + 'abcdefgh'.indexOf(sq[0]);
+  st.last = { from: at('e3'), to: at('f4'), landed: at('f4'), piece: 'wM' };
+  view.selected = at('d2'); // the white Dragon, showing where it can strike
+  view.render({ state: st, orientation: 'w', interactive: 'w', onMove: () => {} });
+
+  // a few floating sparks
+  const sp = document.getElementById('sparks');
+  const rnd = (a, b) => a + Math.random() * (b - a);
+  let seed = 7; const r = () => (seed = (seed * 9301 + 49297) % 233280) / 233280;
+  for (let i = 0; i < 26; i++) {
+    const s = document.createElement('i');
+    s.style.left = (r() * 100) + '%'; s.style.top = (35 + r() * 60) + '%';
+    const z = 2 + r() * 4; s.style.width = s.style.height = z + 'px'; s.style.opacity = .3 + r() * .6;
+    sp.append(s);
+  }
+  void rnd;
+  document.fonts.ready.then(() => { document.body.dataset.ready = '1'; });
+</script>
+</body>
+</html>
